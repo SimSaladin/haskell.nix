@@ -138,6 +138,7 @@ let
     let comps = cfg.components or {};
     in lib.optional (comps ? library) { name = "library"; comp = comps.library; }
        ++ lib.mapAttrsToList (n: c: { name = "sublib:${n}"; comp = c; }) (comps.sublibs or {})
+       ++ lib.mapAttrsToList (n: c: { name = "flib:${n}";   comp = c; }) (comps.foreignlibs or {})
        ++ lib.mapAttrsToList (n: c: { name = "exe:${n}";    comp = c; }) (comps.exes or {})
        ++ lib.mapAttrsToList (n: c: { name = "test:${n}";   comp = c; }) (comps.tests or {})
        ++ lib.mapAttrsToList (n: c: { name = "bench:${n}";  comp = c; }) (comps.benchmarks or {});
@@ -1018,6 +1019,8 @@ let
     else stdenv.hostPlatform.extensions.executable;
   exeName = cname + exeExt;
 
+  flibName = "lib" + cname + ".so";
+
   # ---- per-kind shape ------------------------------------------
   # `componentPrefix.sublibs == "lib"` (haskellLib in lib/default.nix),
   # so a sublib component arrives here with `ctype == "lib"` too.
@@ -1025,6 +1028,7 @@ let
   # package-name`, sublibs have any other name.
   isMainLib  = ctype == "lib" && cname == pkgName;
   isSublib   = ctype == "lib" && cname != pkgName;
+  isForeignlib = ctype == "flib";
   isLibrary   = isMainLib || isSublib;
   # Native exe slices ship the binary inside the cabal-store unit
   # dir under `$out/store/.../<unit>/bin/`.  Cross exe slices target
@@ -1034,6 +1038,7 @@ let
   useTarball  = isLibrary || ctype == "exe";
   targetPrefix =
     if ctype == "lib"   then "lib:"  # main lib + sublib both arrive as ctype="lib"
+    else if ctype == "flib"  then "flib:"
     else if ctype == "exe"   then "exe:"
     else if ctype == "test"  then "test:"
     else "bench:";
@@ -1541,6 +1546,17 @@ let
   # `.exe` on native Windows, `.wasm` for wasm, etc.).
   kindSpecificInstallPhase =
     if isLibrary then hpcCopyForLibrary + trimDistNewstyle
+    else if isForeignlib then ''
+      mkdir -p $out/lib
+      flib=$(find $out/store \( -type f -o -type l \) -name '${flibName}' | head -n1)
+      if [ -z "$flib" ]; then
+        echo "WARN: ${componentKindLabel} foreign library ${flibName} not found in $out/store" >&2
+        find $out/dist-newstyle \( -type f -o -type l \) >&2
+      else
+        cp -av "$flib" "$flib".* $out/lib/
+      fi
+      ${trimDistNewstyle}
+    ''
     else if useTarball then ''
 
       mkdir -p $out/bin
