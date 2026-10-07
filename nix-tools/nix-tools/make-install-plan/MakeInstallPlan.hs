@@ -4,9 +4,9 @@
 import Cabal2Nix (Src, gpd2nix)
 import qualified Cabal2Nix hiding (gpd2nix)
 import qualified Data.ByteString.Lazy as BSL
-import Data.Foldable (for_)
+import Data.Foldable (for_, toList)
 import qualified Data.Text.Encoding as T
-import Distribution.Client.DistDirLayout (DistDirLayout (..))
+import Distribution.Client.DistDirLayout (DistDirLayout (..), ProjectFileKey(..))
 import Distribution.Client.GlobalFlags
 import Distribution.Client.HashValue (HashValue, showHashValue)
 import qualified Distribution.Client.InstallPlan as InstallPlan
@@ -27,6 +27,7 @@ import qualified Distribution.Simple.Utils as Cabal
 import Distribution.Types.SourceRepo (KnownRepoType (..), RepoType (..))
 import Distribution.Verbosity (Verbosity)
 import qualified Distribution.Verbosity as Verbosity
+import Distribution.Parsec.Error (showPErrorWithSource)
 import Freeze (projectFreezeConfig)
 import Nix.Expr
 import Nix.Pretty (prettyNix)
@@ -36,7 +37,7 @@ import ProjectPlanOutput (writePlanExternalRepresentation)
 import System.Environment (getArgs)
 import System.FilePath
 import System.IO (IOMode (WriteMode), hClose, openFile)
-import Distribution.Simple.Utils (topHandler)
+import Distribution.Simple.Utils (dieWithException, topHandler)
 
 main :: IO ()
 main = do
@@ -48,9 +49,10 @@ main = do
     CommandReadyToGo (mkflags, _commandParse) ->
       let globalFlags = defaultGlobalFlags
           flags@NixStyleFlags{configFlags} = mkflags (commandDefaultFlags cmdUI)
-          verbosity = fromFlagOrDefault Verbosity.normal (configVerbosity configFlags)
+          verbosity = Verbosity.mkVerbosity Verbosity.defaultVerbosityHandles
+            (fromFlagOrDefault Verbosity.normal (configVerbosity configFlags))
           cliConfig = commandLineFlagsToProjectConfig globalFlags flags mempty
-       in topHandler (installPlanAction verbosity cliConfig)
+       in topHandler (const True) (installPlanAction verbosity cliConfig)
 
 cmdUI :: CommandUI (NixStyleFlags ())
 cmdUI =
@@ -84,7 +86,7 @@ installPlanAction verbosity cliConfig = do
   -- Write cabal.freeze
   let freezeConfig = projectFreezeConfig elaboratedPlan totalIndexState activeRepos
   writeProjectLocalFreezeConfig distDirLayout freezeConfig
-  Cabal.notice verbosity $ "Wrote freeze file to " ++ distProjectFile distDirLayout "freeze"
+  Cabal.notice verbosity $ "Wrote freeze file to " ++ distProjectFile distDirLayout ProjectFileKeyFreeze
 
   -- Write cabal files and their nix version
   let cabalFilesDir = distDirectory distDirLayout </> "cabal-files"
@@ -109,7 +111,7 @@ installPlanAction verbosity cliConfig = do
           let gpdText = BSL.toStrict pkgTxt
           let src = packageLocation2Src elabPkgSourceLocation elabPkgSourceHash
           let gpd = case runParseResult (parseGenericPackageDescription gpdText) of
-                (_, Left (_, err)) -> error ("Failed to parse in-memory cabal file: " ++ show err)
+                (_, Left (_, errs)) -> error ("Failed to parse in-memory cabal file: " ++ unwords (map showPErrorWithSource $ toList errs))
                 (_, Right desc) -> desc
           let extra = mkNonRecSet ["package-description-override" $= mkStr (T.decodeUtf8 gpdText)]
           let nix = gpd2nix elabLocalToProject Cabal2Nix.MinimalDetails (Just src) (Just extra) gpd

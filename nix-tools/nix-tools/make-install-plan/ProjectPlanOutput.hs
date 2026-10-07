@@ -305,7 +305,7 @@ encodePlanAsJson distDirLayout elaboratedInstallPlan elaboratedSharedConfig targ
       buildSettingOnlyDownload = False,
       buildSettingSummaryFile = mempty,
       buildSettingLogFile = Nothing,
-      buildSettingLogVerbosity = Verbosity.normal,
+      buildSettingLogVerbosity = Verbosity.mkVerbosity Verbosity.defaultVerbosityHandles Verbosity.normal,
       buildSettingBuildReports = NoReports,
       buildSettingSymlinkBinDir = [],
       buildSettingNumJobs = ParStrat.Serial,

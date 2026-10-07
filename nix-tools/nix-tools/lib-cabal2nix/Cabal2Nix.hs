@@ -7,7 +7,8 @@ module Cabal2Nix (cabal2nix, gpd2nix, Src(..), CabalFile(..), CabalFileGenerator
 
 import Distribution.PackageDescription.Parsec (parseGenericPackageDescription, runParseResult)
 import Distribution.Simple.PackageDescription (readGenericPackageDescription)
-import Distribution.Verbosity (normal)
+import Distribution.Parsec.Error (showPErrorWithSource)
+import Distribution.Verbosity (mkVerbosity, defaultVerbosityHandles, normal)
 import Distribution.Pretty ( pretty, prettyShow )
 import Distribution.Utils.ShortText (fromShortText)
 import Distribution.Utils.Path (getSymbolicPath, makeSymbolicPath)
@@ -97,11 +98,13 @@ data CabalDetailLevel = MinimalDetails | FullDetails deriving (Show, Eq)
 cabal2nix :: Bool -> CabalDetailLevel -> Maybe Src -> CabalFile -> IO NExpr
 cabal2nix isLocal fileDetails src = \case
   (OnDisk path) -> gpd2nix isLocal fileDetails src Nothing
-    <$> readGenericPackageDescription normal Nothing (makeSymbolicPath path)
+    <$> readGenericPackageDescription verbosity Nothing (makeSymbolicPath path)
   (InMemory gen _ body) -> gpd2nix isLocal fileDetails src (genExtra <$> gen)
     <$> case runParseResult (parseGenericPackageDescription body) of
-        (_, Left (_, err)) -> error ("Failed to parse in-memory cabal file: " ++ show err)
+        (_, Left (_, errs)) -> error ("Failed to parse in-memory cabal file: " ++ unwords (map showPErrorWithSource $ toList errs))
         (_, Right desc) -> pure desc
+  where verbosity = mkVerbosity defaultVerbosityHandles normal
+
 
 gpd2nix :: Bool -> CabalDetailLevel -> Maybe Src -> Maybe NExpr -> GenericPackageDescription -> NExpr
 gpd2nix isLocal fileDetails src extra gpd =
@@ -149,13 +152,13 @@ instance IsComponent Benchmark where
 
 --- Clean the Tree from empty nodes
 -- CondBranch is empty if the true and false branch are empty.
-shakeTree :: (Foldable t, Foldable f) => CondTree v (t c) (f a) -> Maybe (CondTree v (t c) (f a))
-shakeTree (CondNode d c bs) = case (null d, null bs') of
-                                (True, True) -> Nothing
-                                _            -> Just (CondNode d c bs')
+shakeTree :: Foldable f => CondTree v (f a) -> Maybe (CondTree v (f a))
+shakeTree (CondNode d bs) = case (null d, null bs') of
+                              (True, True) -> Nothing
+                              _            -> Just (CondNode d bs')
   where bs' = catMaybes (shakeBranch <$> bs)
 
-shakeBranch :: (Foldable t, Foldable f) => CondBranch v (t c) (f a) -> Maybe (CondBranch v (t c) (f a))
+shakeBranch :: Foldable f => CondBranch v (f a) -> Maybe (CondBranch v (f a))
 shakeBranch (CondBranch c t f) = case (shakeTree t, f >>= shakeTree) of
   (Nothing, Nothing) -> Nothing
   (Nothing, Just f') -> shakeBranch (CondBranch (CNot c) f' Nothing)
@@ -322,7 +325,7 @@ toNixGenericPackageDescription isLocal detailLevel gpd = mkNonRecSet
                           , "components"    $= components ]
     where _packageName :: IsString a => a
           _packageName = fromString . show . pretty . pkgName . package . packageDescription $ gpd
-          component :: IsComponent comp => UnqualComponentName -> CondTree ConfVar [Dependency] comp -> Binding NExpr
+          component :: IsComponent comp => UnqualComponentName -> CondTree ConfVar comp -> Binding NExpr
           component unQualName comp
             = quoted name $=
                 mkNonRecSet (
@@ -486,27 +489,27 @@ instance ToNixExpr a => ToNixExpr (Condition a) where
   toNix (COr l r) = toNix l $|| toNix r
   toNix (CAnd l r) = toNix l $&& toNix r
 
-instance (Foldable t, ToNixExpr (t a), ToNixExpr v, ToNixExpr c) => ToNixExpr (CondBranch v c (t a)) where
+instance (Foldable t, ToNixExpr (t a), ToNixExpr v) => ToNixExpr (CondBranch v (t a)) where
   toNix (CondBranch c t Nothing) = case toNix t of
     (Fix (NList [e])) -> (mkSym pkgs @. "lib") @. "optional" @@ toNix c @@ e
     e -> (mkSym pkgs @. "lib") @. "optionals" @@ toNix c @@ e
   toNix (CondBranch _c t (Just f)) | toNix t == toNix f = toNix t
   toNix (CondBranch c  t (Just f)) = mkIf (toNix c) (toNix t) (toNix f)
 
-instance (Foldable t, ToNixExpr (t a), ToNixExpr v, ToNixExpr c) => ToNixExpr (CondTree v c (t a)) where
-  toNix (CondNode d _c []) = toNix d
-  toNix (CondNode d _c bs) | null d = foldl1 ($++) (fmap toNix bs)
+instance (Foldable t, ToNixExpr (t a), ToNixExpr v) => ToNixExpr (CondTree v (t a)) where
+  toNix (CondNode d []) = toNix d
+  toNix (CondNode d bs) | null d = foldl1 ($++) (fmap toNix bs)
                            | otherwise = foldl ($++) (toNix d) (fmap toNix bs)
 
-boolBranchToNix :: (ToNixExpr v, ToNixExpr c) => CondBranch v c Bool -> NExpr
+boolBranchToNix :: (ToNixExpr v) => CondBranch v Bool -> NExpr
 boolBranchToNix (CondBranch _c t Nothing) | boolTreeToNix t == mkBool True = mkBool True
 boolBranchToNix (CondBranch c  t Nothing) = mkIf (toNix c) (boolTreeToNix t) (mkBool True)
 boolBranchToNix (CondBranch _c t (Just f)) | boolTreeToNix t == boolTreeToNix f = boolTreeToNix t
 boolBranchToNix (CondBranch c  t (Just f)) = mkIf (toNix c) (boolTreeToNix t) (boolTreeToNix f)
 
-boolTreeToNix :: (ToNixExpr v, ToNixExpr c) => CondTree v c Bool -> NExpr
-boolTreeToNix (CondNode False _c _bs) = mkBool False
-boolTreeToNix (CondNode True _c bs) =
+boolTreeToNix :: (ToNixExpr v) => CondTree v Bool -> NExpr
+boolTreeToNix (CondNode False _bs) = mkBool False
+boolTreeToNix (CondNode True bs) =
   case filter (/= mkBool True) (fmap boolBranchToNix bs) of
     [] -> mkBool True
     bs' -> foldl1 ($&&) bs'
